@@ -1,6 +1,7 @@
 import argparse
 import ast
 import parso
+import textwrap
 
 
 parser = argparse.ArgumentParser()
@@ -105,14 +106,45 @@ def assign_args_to_formals(formals, args):
     return assignment
 
 
-def iterleaves(n):
+def do_inlining(n, actuals, before, after):
     assert isinstance(n, parso.tree.NodeOrLeaf), n
     if isinstance(n, parso.tree.Leaf):
-        yield n
-    else:
-        # assert isinstance(n, parso.tree.Node), n
-        for c in n.children:
-            yield from iterleaves(c)
+        code = n.get_code()
+        if n.value in actuals:
+            yield code.replace(n.value, actuals[n.value].get_code(False))
+        else:
+            yield code
+        return
+    children = n.children
+    if n.type == "if_stmt":
+        if_, expr, *rest = ("".join(do_inlining(c, actuals, before, after)) for c in children)
+        try:
+            expr_value = ast.literal_eval(textwrap.dedent(expr))
+            const = True
+        except Exception:
+            expr_value = None
+            const = False
+        if const and not expr_value and len(children) == 4:
+            # Dead code elimination: `if False: ...` without an else.
+            return
+        yield if_ + expr + "".join(rest)
+        return
+    if n.type in ("star_expr", "argument") and children[1].type == "name":
+        nam = children[1].value
+        if children[0].value == "*":
+            if nam in actuals and isinstance(actuals[nam], list):
+                yield ", ".join(c.get_code(False) for c in actuals[nam])
+                return
+        if children[0].value == "**":
+            if nam in actuals and isinstance(actuals[nam], dict):
+                yield ", ".join("%s=%s" % (k, c.get_code(False)) for k, c in actuals[nam].items())
+                return
+    if n.type == "return_stmt":
+        inner = "".join("".join(do_inlining(c, actuals, before, after)) for c in children[1:])
+        yield "%s%s%s" % (before, inner.strip(), after)
+        return
+    for c in children:
+        yield from do_inlining(c, actuals, before, after)
 
 
 def main():
@@ -137,6 +169,14 @@ def main():
     assert all(a.get_code() == "." + a.children[1].value for a in called_attrs)
     called = [called_name] + [a.children[1] for a in called_attrs]
     print(called_name.parent.get_code(False))
+    anc = call_trailer
+    while anc.type != "expr_stmt":
+        assert anc.parent is not None
+        anc = anc.parent
+    assert anc is not None
+    code = "".join(c.get_code() for c in [called_name, *called_attrs, call_trailer])
+    before, after = anc.get_code().split(code.strip())
+    print("%sHOLE%s" % (before, after))
 
     assert call_trailer.children[0].value == "("
     assert call_trailer.children[2].value == ")"
@@ -162,13 +202,7 @@ def main():
             print(f"{k} = {v}")
     implementation = defn.children[4]
     assert implementation.type == "suite"
-    src = []
-    for n in iterleaves(implementation):
-        s = n.get_code()
-        if n.type == "name" and n.value in actuals:
-            s = s.replace(n.value, actuals[n.value].get_code(False))
-        src.append(s)
-    print("".join(src))
+    print("".join(do_inlining(implementation, actuals, before, after)))
 
 
 if __name__ == "__main__":

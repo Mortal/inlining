@@ -1,4 +1,6 @@
 def foo(a, b, c, *d, **k):
+    dict(**k)
+    print(*d)
     if c:
         print(a, b)
     return a + b
