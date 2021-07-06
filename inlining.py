@@ -5,7 +5,7 @@ import textwrap
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input", required=True)
+parser.add_argument("--input", required=True, dest="filename")
 parser.add_argument("--location", required=True)
 
 
@@ -141,42 +141,41 @@ def do_inlining(n, actuals, before, after):
                 return
     if n.type == "return_stmt":
         inner = "".join("".join(do_inlining(c, actuals, before, after)) for c in children[1:])
-        yield "%s%s%s" % (before, inner.strip(), after)
+        yield "%s%s%s%s" % (n.get_first_leaf().prefix, before.lstrip(), inner.strip(), after)
         return
     for c in children:
         yield from do_inlining(c, actuals, before, after)
 
 
-def main():
-    args = parser.parse_args()
-    lineno, col = map(int, args.location.split(":"))
-    with open(args.input) as fp:
-        code = fp.read()
-    module = parso.parse(code)
-    leaf = module.get_leaf_for_position((lineno, col))
-    assert leaf == "(", leaf
-    assert leaf.parent is not None
-    call_trailer = leaf.parent
+def main(location: str, filename: str):
+    lineno, col = map(int, location.split(":"))
+    with open(filename) as fp:
+        file_contents = fp.read()
+    module = parso.parse(file_contents)
+    name = module.get_name_of_position((lineno, col))
+    assert name.type == "name"
+    call_trailer = name.get_next_sibling()
     assert call_trailer.type == "trailer"
+    leaf = call_trailer.get_first_leaf()
+    assert leaf == "(", leaf
 
     assert call_trailer.parent is not None
     assert call_trailer.parent.type == "atom_expr"
     atom_expr = list(call_trailer.parent.children)
     call_trailer_i = next(i for i, o in enumerate(atom_expr) if o is call_trailer)
     called_name, *called_attrs = atom_expr[:call_trailer_i]
-    assert called_name.type == "name"
+    assert called_name is name
     assert all(a.type == "trailer" and a.children[0].value == "." for a in called_attrs)
     assert all(a.get_code() == "." + a.children[1].value for a in called_attrs)
-    called = [called_name] + [a.children[1] for a in called_attrs]
-    print(called_name.parent.get_code(False))
+    called = [name] + [a.children[1] for a in called_attrs]
+
     anc = call_trailer
     while anc.type != "expr_stmt":
         assert anc.parent is not None
         anc = anc.parent
     assert anc is not None
-    code = "".join(c.get_code() for c in [called_name, *called_attrs, call_trailer])
+    code = "".join(c.get_code() for c in [name, *called_attrs, call_trailer])
     before, after = anc.get_code().split(code.strip())
-    print("%sHOLE%s" % (before, after))
 
     assert call_trailer.children[0].value == "("
     assert call_trailer.children[2].value == ")"
@@ -186,24 +185,32 @@ def main():
     assert all(c.value == "," for c in commas)
     args = arglist.children[::2]
 
-    defn = guess_definition(called[0])
+    defn = guess_definition(name)
     assert defn.type == "funcdef"
-    parameters = defn.children[2]
-    assert parameters.type == "parameters"
-    assert parameters.children[0].value == "("
-    assert parameters.children[-1].value == ")"
-    print("def %s%s:" % (defn.children[1].value, parameters.get_code(False)))
-    formals = parse_formals(parameters.children[1:-1])
+    parameters = defn.get_params()
+    formals = parse_formals(parameters)
     actuals = assign_args_to_formals(formals, args)
-    for k, v in actuals.items():
-        try:
-            print(f"{k} = {v.get_code(False)}")
-        except AttributeError:
-            print(f"{k} = {v}")
     implementation = defn.children[4]
     assert implementation.type == "suite"
-    print("".join(do_inlining(implementation, actuals, before, after)))
+
+    return locals()
+
+
+def print_it(*, lineno, file_contents, called_name, before, after, defn, parameters, actuals, implementation, **_):
+    lines = file_contents.splitlines(True)
+    print("".join(lines[:lineno - 1]), end="")
+    # print(called_name.parent.get_code(False))
+    # print("%sHOLE%s" % (before, after))
+    # print("def %s(%s):" % (defn.children[1].value, " ".join(p.get_code(False) for p in parameters)))
+    # for k, v in actuals.items():
+    #     try:
+    #         print(f"{k} = {v.get_code(False)}")
+    #     except AttributeError:
+    #         print(f"{k} = {v}")
+    inl = "".join(do_inlining(implementation, actuals, before, after))
+    print(inl.strip("\n"))
+    print("".join(lines[lineno:]), end="")
 
 
 if __name__ == "__main__":
-    main()
+    print_it(**main(**vars(parser.parse_args())))
