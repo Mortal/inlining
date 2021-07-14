@@ -1,7 +1,10 @@
+import abc
 import argparse
 import ast
 import parso
 import textwrap
+from abc import ABC
+from typing import Union, List, Dict
 
 
 parser = argparse.ArgumentParser()
@@ -133,7 +136,23 @@ def parse_formals(param_nodes):
     return ast.arguments(posonlyargs, args, vararg, kwonlyargs, kw_defaults, kwarg, defaults)
 
 
-def assign_args_to_formals(formals, args):
+class ActualsBase(ABC):
+    @abc.abstractmethod
+    def lookup(self, node) -> Union[None, parso.tree.NodeOrLeaf, List[parso.tree.NodeOrLeaf], Dict[str, parso.tree.NodeOrLeaf]]:
+        ...
+
+
+class SimpleActuals(ActualsBase):
+    def __init__(self, assignment: Dict[str, Union[parso.tree.NodeOrLeaf, List[parso.tree.NodeOrLeaf], Dict[str, parso.tree.NodeOrLeaf]]]) -> None:
+        self._assignment = assignment
+
+    def lookup(self, node) -> Union[None, parso.tree.NodeOrLeaf, List[parso.tree.NodeOrLeaf], Dict[str, parso.tree.NodeOrLeaf]]:
+        if not isinstance(node, parso.tree.Leaf):
+            return None
+        return self._assignment.get(node.value)
+
+
+def assign_args_to_formals(formals, args) -> SimpleActuals:
     i = 0
     vararg = []
     posargs = formals.posonlyargs + formals.args
@@ -169,11 +188,11 @@ def assign_args_to_formals(formals, args):
     assert not kwarg or formals.kwarg
     if formals.kwarg:
         assignment[formals.kwarg.id] = kwarg
-    return assignment
+    return SimpleActuals(assignment)
 
 
 def get_adjusted_prefix(extra_spaces, n):
-    if n.column != len(n.prefix):
+    if n.start_pos[1] != len(n.prefix):
         return n.prefix
     elif extra_spaces < 0:
         return n.prefix[-extra_spaces:]
@@ -181,14 +200,16 @@ def get_adjusted_prefix(extra_spaces, n):
         return n.prefix + " " * extra_spaces
 
 
-def do_inlining(extra_spaces, n, actuals, before, after):
+def do_inlining(extra_spaces, n, actuals: ActualsBase, before, after):
     assert isinstance(n, parso.tree.NodeOrLeaf), n
+    actual_value = actuals.lookup(n)
+    if actual_value is not None:
+        if not isinstance(actual_value, parso.tree.NodeOrLeaf):
+            raise NotImplementedError("vararg or kwarg")
+        yield get_adjusted_prefix(extra_spaces, n) + actual_value.get_code(False)
+        return
     if isinstance(n, parso.tree.Leaf):
-        if n.value in actuals:
-            value = actuals[n.value].get_code(False)
-        else:
-            value = n.value
-        yield get_adjusted_prefix(extra_spaces, n) + value
+        yield get_adjusted_prefix(extra_spaces, n) + n.value
         return
     # assert isinstance(n, parso.tree.Node), n
     children = n.children
@@ -250,14 +271,15 @@ def do_inlining(extra_spaces, n, actuals, before, after):
             i += 4
         return
     if n.type in ("star_expr", "argument") and children[1].type == "name":
-        nam = children[1].value
         if children[0].value == "*":
-            if nam in actuals and isinstance(actuals[nam], list):
-                yield ", ".join(c.get_code(False) for c in actuals[nam])
+            actual_value = actuals.lookup(children[1])
+            if isinstance(actual_value, list):
+                yield ", ".join(c.get_code(False) for c in actual_value)
                 return
         if children[0].value == "**":
-            if nam in actuals and isinstance(actuals[nam], dict):
-                yield ", ".join("%s=%s" % (k, c.get_code(False)) for k, c in actuals[nam].items())
+            actual_value = actuals.lookup(children[1])
+            if isinstance(actual_value, dict):
+                yield ", ".join("%s=%s" % (k, c.get_code(False)) for k, c in actual_value.items())
                 return
     if n.type == "return_stmt":
         inner = "".join("".join(do_inlining(extra_spaces, c, actuals, before, after)) for c in children[1:])
