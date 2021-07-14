@@ -111,17 +111,19 @@ def parse_formals(param_nodes):
     defaults = []
     for node in param_nodes:
         tok = node.children[0]
-        if tok.value == "*":
+        if tok.type == "tfpdef":
+            tok = tok.children[0]
+        if tok == "*":
             assert not seen_vararg
             seen_vararg = True
             vararg_node = node.children[1:]
             if vararg_node:
                 assert vararg_node[0].type == "name"
                 vararg = ast.Name(vararg_node[0].value)
-        elif tok.value == "**":
+        elif tok == "**":
             assert kwarg is None
             kwarg = ast.Name(node.children[1].value)
-        elif tok.value == "/":
+        elif tok == "/":
             posonlyargs, args = args, []
         elif seen_vararg:
             kwonlyargs.append(ast.Name(tok.value))
@@ -191,7 +193,21 @@ def assign_args_to_formals(formals, args) -> SimpleActuals:
     return SimpleActuals(assignment)
 
 
+def get_indent(n) -> int:
+    p = n.get_first_leaf().prefix
+    l, c = n.get_start_pos_of_prefix()
+    assert n.start_pos[0] == l + p.count("\n")
+    if "\n" in p:
+        return len(p.split("\n")[-1])
+    return n.start_pos[1] - c
+
+
 def get_adjusted_prefix(extra_spaces, n):
+    if "\n" in n.prefix:
+        if extra_spaces < 0:
+            return n.prefix[-extra_spaces:].replace("\n" + " " * -extra_spaces, "\n")
+        else:
+            return " " * extra_spaces + n.prefix.replace("\n", "\n" + " " * extra_spaces)
     if n.start_pos[1] != len(n.prefix):
         return n.prefix
     elif extra_spaces < 0:
@@ -289,16 +305,7 @@ def do_inlining(extra_spaces, n, actuals: ActualsBase, before, after):
         yield from do_inlining(extra_spaces, c, actuals, before, after)
 
 
-def get_indent(n) -> int:
-    l, c = n.get_start_pos_of_prefix()
-    assert n.start_pos[0] == l
-    return n.start_pos[1] - c
-
-
-def main(location: str, filename: str):
-    lineno, col = map(int, location.split(":"))
-    with open(filename) as fp:
-        file_contents = fp.read()
+def get_call(file_contents: str, lineno: int, col: int):
     module = parso.parse(file_contents)
     name = module.get_name_of_position((lineno, col))
     assert name.type == "name"
@@ -315,54 +322,71 @@ def main(location: str, filename: str):
     assert called_name is name
     assert all(a.type == "trailer" and a.children[0].value == "." for a in called_attrs)
     assert all(a.get_code() == "." + a.children[1].value for a in called_attrs)
-    called = [name] + [a.children[1] for a in called_attrs]
-
-    lines = file_contents.splitlines(True)
 
     anc = call_trailer
-    while anc.type != "expr_stmt":
+    while anc.type not in ("expr_stmt", "simple_stmt"):
         assert anc.parent is not None
         anc = anc.parent
     assert anc is not None
+    return anc, name, called_name, called_attrs, call_trailer
+
+
+def get_args(anc, name, called_attrs, call_trailer):
     code = "".join(c.get_code() for c in [name, *called_attrs, call_trailer])
-    context_indentation = get_indent(anc)
     before, after = anc.get_code().split(code.strip())
 
+    assert 2 <= len(call_trailer.children) <= 3
     assert call_trailer.children[0].value == "("
-    assert call_trailer.children[2].value == ")"
-    arglist = call_trailer.children[1]
-    assert arglist.type == "arglist"
-    commas = arglist.children[1::2]
-    assert all(c.value == "," for c in commas)
-    args = arglist.children[::2]
+    assert call_trailer.children[-1].value == ")"
+    if len(call_trailer.children) == 3:
+        arglist = call_trailer.children[1]
+        if arglist.type == "name":
+            args = [arglist]
+        else:
+            assert arglist.type == "arglist", arglist.type
+            commas = arglist.children[1::2]
+            assert all(c.value == "," for c in commas)
+            args = arglist.children[::2]
+    else:
+        args = []
+    return before, after, args
+
+
+def main(location: str, filename: str):
+    lineno, col = map(int, location.split(":"))
+    with open(filename) as fp:
+        file_contents = fp.read()
+    start_line, end_line, inl = compute_inlining(file_contents, lineno, col)
+    print_it(start_line=start_line, end_line=end_line, file_contents=file_contents, inl=inl)
+
+
+def compute_inlining(file_contents, lineno, col):
+    anc, name, called_name, called_attrs, call_trailer = get_call(file_contents, lineno, col)
+    before, after, args = get_args(anc, name, called_attrs, call_trailer)
 
     defn = guess_definition(name)
     assert defn.type == "funcdef"
     parameters = defn.get_params()
     formals = parse_formals(parameters)
     actuals = assign_args_to_formals(formals, args)
-    implementation = defn.children[4]
-    assert implementation.type == "suite"
+    implementation = defn.children[-1]
+    assert implementation.type == "suite", (implementation.type, defn.start_pos)
     assert implementation.children[0].type == "newline"
+    context_indentation = get_indent(anc)
     implementation_indentation = get_indent(implementation.children[1])
+    extra_spaces = context_indentation - implementation_indentation
+    inl = "".join(do_inlining(extra_spaces, implementation, actuals, before, after))
+    start_line = anc.start_pos[0]
+    end_line = anc.end_pos[0]
+    return start_line, end_line, inl.strip("\n")
 
-    return locals()
 
-
-def print_it(*, lines, implementation_indentation, context_indentation, lineno, file_contents, called_name, before, after, defn, parameters, actuals, implementation, **_):
-    print("".join(lines[:lineno - 1]), end="")
-    # print(called_name.parent.get_code(False))
-    # print("%sHOLE%s" % (before, after))
-    # print("def %s(%s):" % (defn.children[1].value, " ".join(p.get_code(False) for p in parameters)))
-    # for k, v in actuals.items():
-    #     try:
-    #         print(f"{k} = {v.get_code(False)}")
-    #     except AttributeError:
-    #         print(f"{k} = {v}")
-    inl = "".join(do_inlining(context_indentation - implementation_indentation, implementation, actuals, before, after))
-    print(inl.strip("\n"))
-    print("".join(lines[lineno:]), end="")
+def print_it(*, start_line, end_line, file_contents, inl, **_):
+    lines = file_contents.splitlines(True)
+    print("".join(lines[:start_line - 1]), end="")
+    print(inl)
+    print("".join(lines[end_line - 1:]), end="")
 
 
 if __name__ == "__main__":
-    print_it(**main(**vars(parser.parse_args())))
+    main(**vars(parser.parse_args()))

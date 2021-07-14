@@ -46,6 +46,27 @@ def bar(x):
     return r
 ```
 
-```
+```vim
 nnoremap \I ma:exec "%!python ~/work/inlining/inlining.py --input /dev/stdin --location ".line(".").":".col(".")<CR>`a
+```
+
+```vim
+py3 <<EOF
+def _load_py_module_from_file(name, filepath):
+	import importlib
+	spec = importlib.util.spec_from_file_location(name, filepath)
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+
+def py_inlining_wrapper():
+	inlining = _load_py_module_from_file("inlining", "/home/rav/work/inlining/inlining.py")
+	w = vim.current.window
+	row, col = w.cursor
+	start_line, end_line, inl = inlining.compute_inlining("\n".join(vim.current.buffer), row, col)
+	if end_line == start_line:
+		end_line += 1
+	vim.current.buffer[start_line-1:end_line-1] = inl.splitlines()
+EOF
+au FileType python nnoremap <silent> <buffer> <Leader>I :py3 py_inlining_wrapper()<CR>
 ```
