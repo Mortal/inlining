@@ -3,6 +3,24 @@ def foo(a, b, c, *d, **k):
     print(*d)
     if c:
         print(a, b)
+    if not c:
+        print(b, a)
+    if True:
+        print("if True")
+    if False:
+        print("if False")
+    elif a:
+        print("elif a")
+    if False:
+        print("if False")
+    elif True:
+        print("elif True")
+    else:
+        print("else after elif True")
+    if False:
+        print("if False")
+    else:
+        print("else")
     return a + b
 
 
