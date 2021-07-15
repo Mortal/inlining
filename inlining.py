@@ -349,9 +349,15 @@ def get_args(call_trailer):
 
 
 def main(location: str, filename: str):
-    lineno, col = map(int, location.split(":"))
     with open(filename) as fp:
         file_contents = fp.read()
+    try:
+        lineno, col = map(int, location.split(":"))
+    except ValueError:
+        if file_contents.count(location) != 1:
+            raise
+        lineno = file_contents[:file_contents.index(location)].count("\n") + 1
+        col = len(file_contents[:file_contents.index(location)].rsplit("\n", 1)[-1])
     start_line, end_line, inl = compute_inlining(file_contents, lineno, col)
     print_it(start_line=start_line, end_line=end_line, file_contents=file_contents, inl=inl)
 
