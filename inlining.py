@@ -305,36 +305,32 @@ def do_inlining(extra_spaces, n, actuals: ActualsBase, before, after):
         yield from do_inlining(extra_spaces, c, actuals, before, after)
 
 
+def get_stmt(node):
+    node = parso.tree.search_ancestor(node, "expr_stmt", "simple_stmt")
+    assert node is not None
+    return node
+
+
 def get_call(file_contents: str, lineno: int, col: int):
     module = parso.parse(file_contents)
     name = module.get_name_of_position((lineno, col))
     assert name.type == "name"
-    call_trailer = name.get_next_sibling()
+    atom_expr = parso.tree.search_ancestor(name, "atom_expr")
+    assert atom_expr is not None
+    assert all(o.type == "trailer" for o in atom_expr.children[1:])
+    i = 1
+    while i < len(atom_expr.children) and atom_expr.children[i].children[0] != "(":
+        assert atom_expr.children[i].children[0] == "."
+        i += 1
+    assert i < len(atom_expr.children)
+    call_trailer = atom_expr.children[i]
     assert call_trailer.type == "trailer"
-    leaf = call_trailer.get_first_leaf()
-    assert leaf == "(", leaf
+    assert call_trailer.children[0] == "("
 
-    assert call_trailer.parent is not None
-    assert call_trailer.parent.type == "atom_expr"
-    atom_expr = list(call_trailer.parent.children)
-    call_trailer_i = next(i for i, o in enumerate(atom_expr) if o is call_trailer)
-    called_name, *called_attrs = atom_expr[:call_trailer_i]
-    assert called_name is name
-    assert all(a.type == "trailer" and a.children[0].value == "." for a in called_attrs)
-    assert all(a.get_code() == "." + a.children[1].value for a in called_attrs)
-
-    anc = call_trailer
-    while anc.type not in ("expr_stmt", "simple_stmt"):
-        assert anc.parent is not None
-        anc = anc.parent
-    assert anc is not None
-    return anc, name, called_name, called_attrs, call_trailer
+    return atom_expr, i
 
 
-def get_args(anc, name, called_attrs, call_trailer):
-    code = "".join(c.get_code() for c in [name, *called_attrs, call_trailer])
-    before, after = anc.get_code().split(code.strip())
-
+def get_args(call_trailer):
     assert 2 <= len(call_trailer.children) <= 3
     assert call_trailer.children[0].value == "("
     assert call_trailer.children[-1].value == ")"
@@ -349,7 +345,7 @@ def get_args(anc, name, called_attrs, call_trailer):
             args = arglist.children[::2]
     else:
         args = []
-    return before, after, args
+    return args
 
 
 def main(location: str, filename: str):
@@ -361,10 +357,18 @@ def main(location: str, filename: str):
 
 
 def compute_inlining(file_contents, lineno, col):
-    anc, name, called_name, called_attrs, call_trailer = get_call(file_contents, lineno, col)
-    before, after, args = get_args(anc, name, called_attrs, call_trailer)
+    atom_expr, call_index = get_call(file_contents, lineno, col)
+    # atom_expr.children:
+    # <NAME> <. ATTR> <. ATTR>  <( ARGS )>  <...MORE TRAILERS>
+    # [0]       ...            [call_index]
 
-    defn = guess_definition(name)
+    anc = get_stmt(atom_expr)
+    code = "".join(c.get_code() for c in atom_expr.children[: call_index + 1]).strip()
+    before, after = anc.get_code().split(code.strip())
+
+    args = get_args(atom_expr.children[call_index])
+
+    defn = guess_definition(atom_expr.children[0])
     assert defn.type == "funcdef"
     parameters = defn.get_params()
     formals = parse_formals(parameters)
